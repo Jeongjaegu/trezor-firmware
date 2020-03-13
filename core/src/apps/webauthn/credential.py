@@ -15,8 +15,15 @@ if False:
 
 # Credential ID values
 _CRED_ID_VERSION = b"\xf1\xd0\x02\x00"
-_CRED_ID_MIN_LENGTH = const(33)
+CRED_ID_MIN_LENGTH = const(33)
+CRED_ID_MAX_LENGTH = const(1024)
 _KEY_HANDLE_LENGTH = const(64)
+
+# Maximum user handle length in bytes.
+_USER_ID_MAX_LENGTH = const(64)
+
+# Maximum supported length of the RP name, user name or user displayName in bytes.
+_NAME_MAX_LENGTH = const(64)
 
 # Credential ID keys
 _CRED_ID_RP_ID = const(1)
@@ -42,6 +49,20 @@ _CURVE_NAME = {
 
 # Key paths
 _U2F_KEY_PATH = const(0x80553246)
+
+
+def _truncate_utf8(string: str, max_bytes: int) -> str:
+    """Truncate the codepoints of a string so that its UTF-8 encoding is at most `max_bytes` in length."""
+    data = string.encode()
+    if len(data) <= max_bytes:
+        return string
+
+    # Find the starting position of the last codepoint in data[0 : max_bytes + 1].
+    i = max_bytes
+    while i >= 0 and data[i] & 0xC0 == 0x80:
+        i -= 1
+
+    return data[:i].decode()
 
 
 class Credential:
@@ -115,7 +136,7 @@ class Fido2Credential(Credential):
     def generate_id(self) -> None:
         self.creation_time = storage.device.next_u2f_counter() or 0
 
-        if not self.check_required_fields():
+        if not self.check_required_fields() or not self.check_field_lengths():
             raise AssertionError
 
         data = {
@@ -147,11 +168,14 @@ class Fido2Credential(Credential):
         tag = ctx.finish()
         self.id = _CRED_ID_VERSION + iv + ciphertext + tag
 
+        if len(self.id) > CRED_ID_MAX_LENGTH:
+            raise AssertionError
+
     @classmethod
     def from_cred_id(
         cls, cred_id: bytes, rp_id_hash: Optional[bytes]
     ) -> "Fido2Credential":
-        if len(cred_id) < _CRED_ID_MIN_LENGTH or cred_id[0:4] != _CRED_ID_VERSION:
+        if len(cred_id) < CRED_ID_MIN_LENGTH or cred_id[0:4] != _CRED_ID_VERSION:
             raise ValueError  # invalid length or version
 
         key = seed.derive_slip21_node_without_passphrase(
@@ -208,11 +232,32 @@ class Fido2Credential(Credential):
 
         return cred
 
+    def truncate_names(self) -> None:
+        if self.rp_name:
+            self.rp_name = _truncate_utf8(self.rp_name, _NAME_MAX_LENGTH)
+
+        if self.user_name:
+            self.user_name = _truncate_utf8(self.user_name, _NAME_MAX_LENGTH)
+
+        if self.user_display_name:
+            self.user_display_name = _truncate_utf8(
+                self.user_display_name, _NAME_MAX_LENGTH
+            )
+
     def check_required_fields(self) -> bool:
         return (
             self.rp_id is not None
             and self.user_id is not None
             and self.creation_time is not None
+        )
+
+    def check_field_lengths(self) -> bool:
+        return (
+            len(self.rp_name or b"") <= _NAME_MAX_LENGTH
+            and len(self.user_id or b"") <= _USER_ID_MAX_LENGTH
+            and len(self.user_name or b"") <= _NAME_MAX_LENGTH
+            and len(self.user_display_name or b"") <= _NAME_MAX_LENGTH
+            and len(self.id or b"") <= CRED_ID_MAX_LENGTH
         )
 
     def check_data_types(self) -> bool:
